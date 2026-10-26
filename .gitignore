@@ -20,3 +20,11 @@ venv/
 
 # os
 .DS_Store
+
+# ZxmWare runtime / build artifacts
+server/data/pending_install.json
+tools/.watch_last_port
+tools/.curate_cache/
+apps_src/*/dist/
+apps_src/*/.ufbt/
+apps_src/*/.vscode/

@@ -1,0 +1,6 @@
+{
+  "_comment": "Sources the ZxmWare curator builds apps from. SECURITY: git sources are cloned, compiled, and RUN on your device - only add repos you trust. 'local' paths are relative to the repo root. Add git entries like: {\"type\":\"git\",\"url\":\"https://github.com/owner/repo\",\"ref\":\"main\",\"subdir\":\"applications\"}",
+  "sources": [
+    { "type": "local", "path": "apps_src" }
+  ]
+}

@@ -1,0 +1,11 @@
+App(
+    appid="zxm_hello",
+    name="ZxmWare Hello",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="zxm_hello_app",
+    stack_size=2 * 1024,
+    fap_category="Tools",
+    fap_author="ZxmWare",
+    fap_version="1.0",
+    fap_description="Proof-of-concept app built on-demand by ZxmWare.",
+)

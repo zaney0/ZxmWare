@@ -1,98 +1,103 @@
 # ZxmWare
 
 A **self-hosted custom-firmware distribution + package manager** for the
-[Flipper Zero](https://flipperzero.one/). ZxmWare lets you host your own branded
-firmware builds and a curated repository of `.fap` applications, then push them to
-a Flipper over USB with a companion installer — your own private alternative to the
-public firmware/app channels.
+[Flipper Zero](https://flipperzero.one/) — host your own branded firmware and a curated
+`.fap` app repository, build new apps on request, and push everything to the device over
+USB. Your own private firmware/app channel.
 
-> Custom Flipper firmware (Xtreme, Unleashed, RogueMaster, Momentum, official) is a
-> normal part of the Flipper ecosystem. ZxmWare is infrastructure for *distributing*
-> such a build that **you** produce and host. See [`docs/SAFETY.md`](docs/SAFETY.md)
-> — flashing firmware can brick a device if interrupted, and you are responsible for
-> complying with local law on what the device transmits.
+> Custom Flipper firmware (Xtreme, Unleashed, Momentum, official) is a normal part of the
+> ecosystem. ZxmWare is the infrastructure to *build, brand, host and install* one you
+> control. Read [`docs/SAFETY.md`](docs/SAFETY.md) — flashing can brick a device if
+> interrupted, and you are responsible for complying with local law on RF transmission.
 
-## What it does
+## Key features
 
-```
-          build/                      server/ (Docker)                installer/
-   ┌───────────────────┐        ┌──────────────────────┐        ┌──────────────────┐
-   │ fbt build / fork  │        │  FastAPI             │        │  zxmware.py (CLI)│
-   │ rebrand + splash  │  .tgz  │  /firmware/*.tgz     │  HTTP  │  web/index.html  │
-   │ pack_update.py    ├───────►│  /apps/*.fap         ├───────►│  (Web Serial)    │
-   └───────────────────┘        │  directory.json x2   │        └────────┬─────────┘
-                                 └──────────────────────┘                 │ USB serial
-                                                                          ▼
-                                                                   🐬 Flipper Zero
-```
-
-1. **Build pipeline** (`build/`) — produce an OTA bundle, either by building a
-   firmware fork with the official Flipper Build Tool (`fbt`) or by **rebranding an
-   existing bundle** (name + splash) with `pack_update.py`. Output is a
-   `ZxmWare-<ver>.tgz` in the exact format the Flipper updater installs.
-2. **Self-hosted server** (`server/`) — a Dockerized FastAPI app that serves firmware
-   bundles, the `.fap` app repo, and two `directory.json` manifests (firmware channels
-   + app catalog). An indexer scans your data dir and (re)generates the manifests.
-3. **Companion installer/updater** (`installer/`) — a CLI and a Web-Serial browser page
-   that talk to the server and flash firmware / install apps onto the Flipper over USB,
-   with mandatory `sha256` verification and auto-update.
+- 🏷️ **Firmware-level branding** — compiles an Xtreme fork so the device itself reports
+  ZxmWare (boot screen, About, updater), not just the bundle name.
+- 📦 **Self-hosted server** — Dockerized FastAPI serving firmware OTA bundles + a `.fap`
+  repo with auto-generated `directory.json` manifests.
+- 🔌 **Companion installer** — CLI + Web-Serial GUI that flash firmware and install apps
+  over USB, every transfer **md5/sha256-verified**.
+- 🛠️ **On-demand app builder** — describe an app, it's compiled to a `.fap` against your
+  firmware's SDK and pushed to the device in one command.
+- 🤖 **Auto-curator + notify** — a scheduled agent builds new apps from your trusted
+  sources and notifies you when there's fresh stuff to install.
+- ⚡ **Plug-in auto-sync** — a background watcher installs queued apps the moment you
+  plug the Flipper in.
+- 🔁 **Reliable RPC transfer** — uses the Flipper protobuf-RPC protocol (what qFlipper
+  uses), after proving the text CLI corrupts binary payloads.
 
 ## Layout
 
 ```
 ZxmWare/
-├── build/
-│   ├── pack_update.py          # rebrand/repack an OTA bundle -> ZxmWare-<ver>.tgz   ✅ included
-│   ├── build_zxmware.sh        # fbt wrapper (build from a firmware fork)
-│   └── branding/               # splash + name branding helpers
-├── server/
-│   ├── app/main.py             # FastAPI: /firmware, /apps, directory.json
-│   ├── indexer/                # index_repo.py + import_from_bundle.py
-│   ├── Dockerfile, docker-compose.yml
-│   └── data/                   # <-- drop firmware .tgz and .fap files here (git-ignored)
-├── installer/
-│   ├── zxmware.py              # companion CLI (pyserial + HTTP)
-│   └── web/index.html          # Web Serial GUI installer
-├── docs/                       # ARCHITECTURE, QUICKSTART, SAFETY
-└── Makefile
+├── build/           pack_update.py (rebrand/pack bundles) + fbt wrapper + branding
+├── server/          FastAPI app, indexer, Dockerfile; data/ holds bundles + .fap repo
+├── installer/       zxmware.py (CLI) + web/index.html (Web Serial GUI)
+├── tools/           build_app.py, curate.py, watch_flipper.py + automation/ (launchd)
+├── apps_src/        source for on-demand apps (e.g. zxm_hello)
+└── docs/            ARCHITECTURE, QUICKSTART, SAFETY, BRANDING, AUTOMATION
 ```
 
-## 60-second start (with a bundle you already have)
+## Quick start
+
+**Run the server** (hosts firmware + apps):
+```bash
+cd server && docker compose up -d --build        # or: make serve
+```
+Open `http://localhost:8000` — firmware builds + app catalog.
+
+**Install onto the Flipper** (plug in over USB):
+```bash
+pip install -r installer/requirements.txt
+export ZXMWARE_SERVER=http://localhost:8000
+python3 installer/zxmware.py detect
+python3 installer/zxmware.py sync
+python3 installer/zxmware.py install-app ble_spam
+python3 installer/zxmware.py update-firmware --version 0054
+```
+Or open `installer/web/index.html` in Chrome/Edge for the Web-Serial GUI.
+
+## Build a custom app on request
 
 ```bash
-# 1. Rebrand an existing OTA bundle dir (one that contains update.fuf) into ZxmWare
-make rebrand SRC=/path/to/XFW-0053_02022024 VERSION=0053
-
-# 2. Seed the app repo from that bundle's resources, then index everything
-make seed-apps SRC=/path/to/XFW-0053_02022024
-make index
-
-# 3. Serve it
-make serve-docker          # or: make serve   (local uvicorn)
-
-# 4. From the companion CLI: sync the catalog and install onto the Flipper
-make sync
-python3 installer/zxmware.py list-apps
-python3 installer/zxmware.py install-app ble_spam
-python3 installer/zxmware.py update-firmware --version 0053
+# source lives in apps_src/<name>/ (application.fam + C); then:
+python3 tools/build_app.py apps_src/zxm_hello --install
 ```
+Builds the `.fap`, adds it to the catalog, and installs it to the device (md5-verified).
+See [`docs/AUTOMATION.md`](docs/AUTOMATION.md).
 
-Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
-Format + internals: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+## Auto-updater (curator + plug-in sync)
 
-## OTA bundle format (what ZxmWare produces & installs)
+```bash
+bash tools/automation/install.sh        # installs two launchd agents
+```
+- **Curator** (daily) builds new apps from `tools/curate_sources.json`, queues them, and
+  notifies you to plug in.
+- **Watcher** installs the queue automatically when the Flipper connects.
 
-A bundle is a directory packed as `<Name>-<ver>/…` inside a `.tgz`:
+Full setup, config and security notes: [`docs/AUTOMATION.md`](docs/AUTOMATION.md).
 
-| file           | purpose                                        |
-|----------------|------------------------------------------------|
-| `update.fuf`   | upgrade manifest (`Target: 7`, file refs, CRCs, option bytes) |
-| `firmware.dfu` | main MCU firmware (DfuSe)                       |
-| `radio.bin`    | BLE copro stack                                |
-| `updater.bin`  | self-updater loader                            |
-| `resources.tar`| SD resources (`apps/`, `dolphin/`, … + `Manifest`) |
-| `splash.bin`   | boot splash (Flipper `hdgr` compressed image)  |
+## Firmware branding (from source)
 
-`pack_update.py` only rewrites the `Info:` name and (optionally) swaps the splash —
-it **never** touches `Target`, CRC, or option-byte (`OB`) lines, because changing
-those bricks the device.
+`ZxmWare-0053` was a rebrand of a prebuilt bundle; `ZxmWare-0054` is a from-source build
+where the device reports `firmware_origin_fork: ZxmWare`. Exact patches + build steps
+(incl. the *build from a path without spaces* caveat): [`docs/BRANDING.md`](docs/BRANDING.md).
+
+## Releases
+
+Prebuilt OTA bundles (`.tgz` + sha256) are published under
+[Releases](https://github.com/zaney0/ZxmWare/releases): flash with qFlipper or the
+companion installer.
+
+## OTA bundle format
+
+A bundle is `<Name>-<ver>/…` in a `.tgz`: `update.fuf` (manifest: Target, file refs,
+CRCs, option bytes), `firmware.dfu`, `radio.bin`, `updater.bin`, `resources.tar`,
+`splash.bin`. Tooling only ever rewrites the `Info:` name and splash — never CRC/OB
+(editing those bricks the device). Details in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Docs
+
+- [QUICKSTART](docs/QUICKSTART.md) · [ARCHITECTURE](docs/ARCHITECTURE.md) ·
+  [AUTOMATION](docs/AUTOMATION.md) · [BRANDING](docs/BRANDING.md) · [SAFETY](docs/SAFETY.md)
