@@ -1,0 +1,22 @@
+# Served payloads can be large / licensed — keep them out of git
+server/data/firmware/*.tgz
+server/data/firmware/*.sha256
+server/data/apps/**/*.fap
+server/data/**/directory.json
+
+# but keep the directory structure
+!server/data/firmware/.gitkeep
+!server/data/apps/.gitkeep
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# client cache
+.zxmware/
+
+# os
+.DS_Store

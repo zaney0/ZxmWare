@@ -1,0 +1,34 @@
+# Keep the image small and never bake in the large served content or local cruft.
+
+# Served content (bind-mounted at runtime instead).
+data/
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Test / coverage / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Tooling / editor / VCS
+.git/
+.gitignore
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Docs & compose aren't needed inside the image
+README.md
+docker-compose.yml

@@ -1,0 +1,10 @@
+# Dependencies for the ZxmWare companion CLI (zxmware.py)
+#
+# pyserial  -- USB CDC serial communication with the Flipper Zero CLI.
+# requests  -- HTTP client for talking to the ZxmWare server. Optional at
+#              runtime (the tool falls back to urllib from the stdlib if it is
+#              missing), but recommended for better timeout/error handling.
+#
+# Versions are pinned to recent releases known to work together.
+pyserial==3.5
+requests==2.32.3

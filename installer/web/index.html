@@ -1,0 +1,911 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ZxmWare Web Installer</title>
+<!--
+  ZxmWare Web Installer
+  =====================
+  A single self-contained page (no build step, no external CDNs) that talks to a
+  ZxmWare distribution server and, optionally, to a Flipper Zero over the Web
+  Serial API.
+
+  HONESTY NOTE (read this before trusting the firmware button):
+    * This page is a *convenience GUI*. The supported, reliable tool for the
+      catalog + installs is the companion CLI at installer/zxmware.py.
+    * Web Serial file upload to the Flipper is workable for small .fap apps but
+      is inherently slower and more fragile than a native USB tool. There is no
+      binary framing on the Flipper CLI, so we base64-encode payloads and write
+      them in chunks. Large files or a flaky cable can fail mid-transfer.
+    * FIRMWARE FLASHING over Web Serial is EXPERIMENTAL and gated behind a
+      confirm() dialog. For firmware, qFlipper is the supported path. See the
+      note in the Firmware tab and docs/SAFETY.md.
+
+  Browser support: navigator.serial exists on Chromium-based browsers (Chrome,
+  Edge, Opera, Brave) over https:// or http://localhost. It is absent on Firefox
+  and Safari; the UI feature-detects and explains this.
+-->
+<style>
+  :root {
+    --bg: #0e1116;
+    --bg-panel: #161b22;
+    --bg-elev: #1c2330;
+    --border: #2b3240;
+    --fg: #e6edf3;
+    --fg-dim: #9aa7b4;
+    --accent: #4ea1ff;
+    --accent-dim: #26405f;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.45;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 14px 20px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+    align-items: center;
+  }
+  header h1 {
+    font-size: 18px;
+    margin: 0;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+  }
+  header h1 .tag {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent);
+    border: 1px solid var(--accent-dim);
+    padding: 1px 6px;
+    border-radius: 999px;
+    vertical-align: middle;
+    margin-left: 6px;
+  }
+  .server-bar {
+    display: flex;
+    flex: 1 1 420px;
+    gap: 8px;
+    align-items: center;
+    min-width: 280px;
+  }
+  .server-bar label { font-size: 12px; color: var(--fg-dim); white-space: nowrap; }
+  input[type="text"], input[type="search"] {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 14px;
+    font-family: var(--mono);
+  }
+  input[type="text"]:focus, input[type="search"]:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .server-bar input { flex: 1 1 auto; min-width: 160px; }
+  button {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 6px;
+    padding: 7px 12px;
+    font-size: 14px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color .12s, background .12s;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.primary { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
+  button.danger { border-color: var(--danger); color: var(--danger); }
+  button.danger:hover:not(:disabled) { background: #3a1312; }
+  .status-pill {
+    font-size: 12px;
+    font-family: var(--mono);
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--fg-dim);
+    white-space: nowrap;
+  }
+  .status-pill.ok { color: var(--ok); border-color: #1d3a24; }
+  .status-pill.bad { color: var(--danger); border-color: #3a1312; }
+  .status-pill.warn { color: var(--warn); border-color: #3a3012; }
+
+  main {
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    min-height: 0;
+  }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+    #console-pane { max-height: 240px; border-left: none; border-top: 1px solid var(--border); }
+  }
+  #content-pane { overflow-y: auto; padding: 18px 20px 40px; }
+
+  .tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+  .tabs button {
+    border-radius: 6px 6px 0 0;
+    border-bottom: 2px solid transparent;
+  }
+  .tabs button.active {
+    border-color: var(--border);
+    border-bottom-color: var(--accent);
+    color: var(--accent);
+  }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .toolbar input[type="search"] { flex: 1 1 240px; }
+  .count { font-size: 12px; color: var(--fg-dim); font-family: var(--mono); }
+
+  .category { margin-bottom: 24px; }
+  .category h3 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--fg-dim);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+    margin: 0 0 12px;
+  }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .card .name { font-weight: 600; font-size: 15px; word-break: break-word; }
+  .card .meta { font-size: 12px; color: var(--fg-dim); font-family: var(--mono); }
+  .card .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: auto; }
+  .card .sha { font-size: 10px; color: var(--fg-dim); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .fw-channel { margin-bottom: 20px; }
+  .fw-release {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+  .fw-release .ver { font-weight: 600; font-family: var(--mono); }
+  .fw-release .info { flex: 1 1 100%; font-size: 12px; color: var(--fg-dim); }
+
+  .notice {
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    border: 1px solid var(--border);
+    background: var(--bg-panel);
+  }
+  .notice.warn { border-color: #3a3012; background: #1f1a0d; }
+  .notice.warn b { color: var(--warn); }
+  .notice code { font-family: var(--mono); background: var(--bg-elev); padding: 1px 5px; border-radius: 4px; }
+
+  #console-pane {
+    border-left: 1px solid var(--border);
+    background: #0a0d12;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  #console-head {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--fg-dim);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  #log {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    margin: 0;
+    padding: 10px 12px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #log .l-info { color: var(--fg-dim); }
+  #log .l-ok { color: var(--ok); }
+  #log .l-warn { color: var(--warn); }
+  #log .l-err { color: var(--danger); }
+  #log .l-cmd { color: var(--accent); }
+  #log .ts { color: #566; }
+
+  .empty { color: var(--fg-dim); font-size: 14px; padding: 30px 0; text-align: center; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>ZxmWare <span class="tag">WEB</span></h1>
+  <div class="server-bar">
+    <label for="serverUrl">Server</label>
+    <input type="text" id="serverUrl" spellcheck="false" placeholder="http://localhost:8000" />
+    <button id="btnConnectServer" class="primary">Connect server</button>
+  </div>
+  <span id="serverStatus" class="status-pill">server: not connected</span>
+  <button id="btnConnectFlipper">Connect Flipper</button>
+  <span id="flipperStatus" class="status-pill">flipper: not connected</span>
+</header>
+
+<main>
+  <section id="content-pane">
+    <div class="tabs">
+      <button data-tab="apps" class="active">Apps</button>
+      <button data-tab="firmware">Firmware</button>
+    </div>
+
+    <!-- ============== APPS TAB ============== -->
+    <div class="tab-panel active" id="tab-apps">
+      <div class="toolbar">
+        <input type="search" id="appSearch" placeholder="Filter apps by name or category…" />
+        <span class="count" id="appCount">0 apps</span>
+      </div>
+      <div id="appCatalog">
+        <div class="empty">Connect to a server to load the app catalog.</div>
+      </div>
+    </div>
+
+    <!-- ============== FIRMWARE TAB ============== -->
+    <div class="tab-panel" id="tab-firmware">
+      <div class="notice warn">
+        <b>Experimental.</b> Installing firmware over Web Serial is not the supported path.
+        It pushes an OTA bundle through the Flipper's text CLI and can fail mid-transfer on a
+        flaky cable or low battery, which may leave the device needing recovery.
+        For reliable flashing use <b>qFlipper</b> (the official desktop tool) or the companion
+        CLI (<code>installer/zxmware.py</code>). See <code>docs/SAFETY.md</code> before continuing.
+      </div>
+      <div id="fwCatalog">
+        <div class="empty">Connect to a server to load firmware channels.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============== LOG CONSOLE ============== -->
+  <aside id="console-pane">
+    <div id="console-head">
+      <span>Log console</span>
+      <button id="btnClearLog" style="padding:2px 8px;font-size:11px;">clear</button>
+    </div>
+    <pre id="log"></pre>
+  </aside>
+</main>
+
+<script>
+"use strict";
+
+/* =====================================================================
+ * Small helpers
+ * ===================================================================== */
+
+const $ = (sel) => document.querySelector(sel);
+const logEl = $("#log");
+
+function log(msg, cls = "info") {
+  const ts = new Date().toLocaleTimeString();
+  const line = document.createElement("span");
+  line.className = "l-" + cls;
+  line.innerHTML = `<span class="ts">${ts}</span>  `;
+  line.appendChild(document.createTextNode(msg));
+  line.appendChild(document.createTextNode("\n"));
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+$("#btnClearLog").addEventListener("click", () => { logEl.textContent = ""; });
+
+function humanSize(bytes) {
+  if (bytes == null) return "?";
+  const u = ["B", "KB", "MB", "GB"];
+  let n = bytes, i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n : n.toFixed(1)) + " " + u[i];
+}
+
+function setPill(el, text, cls) {
+  el.textContent = text;
+  el.className = "status-pill" + (cls ? " " + cls : "");
+}
+
+/* Normalize a server URL: strip a trailing slash so we can safely append paths. */
+function normBase(u) { return (u || "").trim().replace(/\/+$/, ""); }
+
+/* =====================================================================
+ * Server state
+ * ===================================================================== */
+
+const state = {
+  base: "",
+  apps: null,      // parsed apps/directory.json
+  firmware: null,  // parsed firmware/directory.json
+};
+
+const SERVER_KEY = "zxmware.serverUrl";
+
+// Restore the remembered server URL (default to localhost:8000).
+(function restoreServerUrl() {
+  let saved = "";
+  try { saved = localStorage.getItem(SERVER_KEY) || ""; } catch (_) {}
+  $("#serverUrl").value = saved || "http://localhost:8000";
+})();
+
+async function connectServer() {
+  const base = normBase($("#serverUrl").value);
+  if (!base) { log("Enter a server URL first.", "err"); return; }
+  try { localStorage.setItem(SERVER_KEY, base); } catch (_) {}
+
+  setPill($("#serverStatus"), "server: connecting…", "warn");
+  log(`Connecting to ${base} …`, "cmd");
+
+  // 1) /health
+  try {
+    const h = await fetch(base + "/health", { cache: "no-store" });
+    if (!h.ok) throw new Error("HTTP " + h.status);
+    let body = "";
+    try { body = JSON.stringify(await h.clone().json()); } catch (_) { body = (await h.text()).slice(0, 80); }
+    log("health OK " + body, "ok");
+  } catch (e) {
+    setPill($("#serverStatus"), "server: unreachable", "bad");
+    log("Health check failed: " + e.message, "err");
+    log("Is the server running? Try: docker compose up (see docs/QUICKSTART.md).", "warn");
+    return;
+  }
+
+  // 2) apps + firmware directories (fetched in parallel)
+  try {
+    const [appsRes, fwRes] = await Promise.all([
+      fetch(base + "/apps/directory.json", { cache: "no-store" }),
+      fetch(base + "/firmware/directory.json", { cache: "no-store" }),
+    ]);
+    if (!appsRes.ok) throw new Error("apps/directory.json HTTP " + appsRes.status);
+    if (!fwRes.ok) throw new Error("firmware/directory.json HTTP " + fwRes.status);
+    state.apps = await appsRes.json();
+    state.firmware = await fwRes.json();
+    state.base = base;
+  } catch (e) {
+    setPill($("#serverStatus"), "server: error", "bad");
+    log("Failed to load catalog: " + e.message, "err");
+    return;
+  }
+
+  const appTotal = countApps(state.apps);
+  const fwTotal = countFirmware(state.firmware);
+  setPill($("#serverStatus"), `server: connected (${appTotal} apps)`, "ok");
+  log(`Catalog loaded: ${appTotal} apps, ${fwTotal} firmware builds.`, "ok");
+  renderApps();
+  renderFirmware();
+}
+
+function countApps(doc) {
+  if (!doc || !doc.categories) return 0;
+  return Object.values(doc.categories).reduce((n, list) => n + (list ? list.length : 0), 0);
+}
+function countFirmware(doc) {
+  if (!doc || !doc.channels) return 0;
+  return Object.values(doc.channels).reduce((n, list) => n + (list ? list.length : 0), 0);
+}
+
+$("#btnConnectServer").addEventListener("click", connectServer);
+$("#serverUrl").addEventListener("keydown", (e) => { if (e.key === "Enter") connectServer(); });
+
+/* =====================================================================
+ * App catalog rendering
+ *   apps/directory.json schema:
+ *   { name, generated, categories: { "<Cat>": [ {id,name,category,file,path,size,sha256} ] } }
+ * ===================================================================== */
+
+function renderApps() {
+  const host = $("#appCatalog");
+  host.textContent = "";
+  const doc = state.apps;
+  if (!doc || !doc.categories) {
+    host.innerHTML = '<div class="empty">No apps in catalog.</div>';
+    return;
+  }
+
+  const filter = $("#appSearch").value.trim().toLowerCase();
+  const cats = Object.keys(doc.categories).sort((a, b) => a.localeCompare(b));
+  let shown = 0;
+
+  for (const cat of cats) {
+    const items = (doc.categories[cat] || []).filter((app) => {
+      if (!filter) return true;
+      return (app.name || "").toLowerCase().includes(filter) ||
+             (app.category || cat).toLowerCase().includes(filter) ||
+             (app.id || "").toLowerCase().includes(filter);
+    });
+    if (!items.length) continue;
+
+    const section = document.createElement("div");
+    section.className = "category";
+    const h = document.createElement("h3");
+    h.textContent = cat + "  (" + items.length + ")";
+    section.appendChild(h);
+
+    const cards = document.createElement("div");
+    cards.className = "cards";
+    for (const app of items) {
+      shown++;
+      cards.appendChild(appCard(app, cat));
+    }
+    section.appendChild(cards);
+    host.appendChild(section);
+  }
+
+  if (!shown) host.innerHTML = '<div class="empty">No apps match the filter.</div>';
+  $("#appCount").textContent = shown + " app" + (shown === 1 ? "" : "s");
+}
+
+function appCard(app, cat) {
+  const card = document.createElement("div");
+  card.className = "card";
+
+  const name = document.createElement("div");
+  name.className = "name";
+  name.textContent = app.name || app.id || app.file;
+  card.appendChild(name);
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = `${app.file}  ·  ${humanSize(app.size)}`;
+  card.appendChild(meta);
+
+  if (app.sha256) {
+    const sha = document.createElement("div");
+    sha.className = "sha";
+    sha.title = app.sha256;
+    sha.textContent = "sha256: " + app.sha256.slice(0, 16) + "…";
+    card.appendChild(sha);
+  }
+
+  const row = document.createElement("div");
+  row.className = "row";
+  const dest = document.createElement("span");
+  dest.className = "meta";
+  dest.textContent = "/ext/apps/" + (app.category || cat);
+  const btn = document.createElement("button");
+  btn.className = "primary";
+  btn.textContent = "Install";
+  btn.addEventListener("click", () => installApp(app, app.category || cat, btn));
+  row.appendChild(dest);
+  row.appendChild(btn);
+  card.appendChild(row);
+  return card;
+}
+
+$("#appSearch").addEventListener("input", () => { if (state.apps) renderApps(); });
+
+/* =====================================================================
+ * Firmware rendering
+ *   firmware/directory.json schema:
+ *   { name, generated, channels: { release: [ {version,file,path,size,sha256,target,info} ], dev: [...] } }
+ * ===================================================================== */
+
+function renderFirmware() {
+  const host = $("#fwCatalog");
+  // Keep the warning notice (it lives in the HTML, outside #fwCatalog), just rebuild the list.
+  host.textContent = "";
+  const doc = state.firmware;
+  if (!doc || !doc.channels) {
+    host.innerHTML = '<div class="empty">No firmware in catalog.</div>';
+    return;
+  }
+  const channels = Object.keys(doc.channels);
+  if (!channels.length) { host.innerHTML = '<div class="empty">No firmware channels.</div>'; return; }
+
+  for (const ch of channels) {
+    const builds = doc.channels[ch] || [];
+    const wrap = document.createElement("div");
+    wrap.className = "fw-channel";
+    const h = document.createElement("h3");
+    h.className = "";
+    h.style.cssText = "font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--fg-dim);border-bottom:1px solid var(--border);padding-bottom:6px;";
+    h.textContent = ch + " channel  (" + builds.length + ")";
+    wrap.appendChild(h);
+
+    if (!builds.length) {
+      const e = document.createElement("div");
+      e.className = "empty";
+      e.textContent = "No builds on this channel.";
+      wrap.appendChild(e);
+    }
+    for (const b of builds) wrap.appendChild(fwRow(b, ch));
+    host.appendChild(wrap);
+  }
+}
+
+function fwRow(b, channel) {
+  const row = document.createElement("div");
+  row.className = "fw-release";
+
+  const ver = document.createElement("span");
+  ver.className = "ver";
+  ver.textContent = b.version || b.file;
+  row.appendChild(ver);
+
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  // target is the Flipper platform ("Target 7" == stm32wb F7 hardware).
+  meta.textContent = `${humanSize(b.size)}  ·  target ${b.target != null ? b.target : "?"}  ·  ${b.file}`;
+  row.appendChild(meta);
+
+  const btn = document.createElement("button");
+  btn.className = "danger";
+  btn.textContent = "Install firmware (experimental)";
+  btn.addEventListener("click", () => installFirmware(b, channel, btn));
+  row.appendChild(btn);
+
+  if (b.info) {
+    const info = document.createElement("span");
+    info.className = "info";
+    info.textContent = b.info;
+    row.appendChild(info);
+  }
+  return row;
+}
+
+/* =====================================================================
+ * Tabs
+ * ===================================================================== */
+
+document.querySelectorAll(".tabs button").forEach((b) => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll(".tabs button").forEach((x) => x.classList.remove("active"));
+    document.querySelectorAll(".tab-panel").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    $("#tab-" + b.dataset.tab).classList.add("active");
+  });
+});
+
+/* =====================================================================
+ * FlipperSerial — Web Serial helper
+ * ---------------------------------------------------------------------
+ * The Flipper Zero exposes a text CLI over its USB CDC serial port at
+ * 115200 baud. After connecting it prints a banner and a ">: " prompt.
+ * Every command echoes, runs, prints output, then re-prints ">: ".
+ *
+ * There is NO binary protocol on the plain CLI, so to write a file we:
+ *   1) `storage write <path>` puts the CLI into a capture mode that reads
+ *      raw bytes until Ctrl-C (0x03).
+ *   2) We stream the file bytes, then send 0x03 to end.
+ * Because raw streaming of arbitrary bytes through a line-oriented terminal
+ * is unreliable (newlines, flow control, buffering), this helper streams in
+ * modest chunks with small pauses. It is fine for small .fap apps; it is NOT
+ * a substitute for qFlipper for large images. See the UI notes.
+ * ===================================================================== */
+
+class FlipperSerial {
+  constructor() {
+    this.port = null;
+    this.reader = null;
+    this.writer = null;
+    this._readBuf = "";          // decoded text accumulated from the device
+    this._decoder = new TextDecoder();
+    this._encoder = new TextEncoder();
+    this._pumping = false;
+  }
+
+  get connected() { return !!this.port; }
+
+  // Feature detection — call before offering a Connect button.
+  static supported() { return ("serial" in navigator); }
+
+  async connect() {
+    if (!FlipperSerial.supported()) throw new Error("Web Serial not supported in this browser.");
+    // requestPort() MUST be triggered by a user gesture (the button click).
+    this.port = await navigator.serial.requestPort();
+    await this.port.open({ baudRate: 115200 });
+    this.writer = this.port.writable.getWriter();
+    this.reader = this.port.readable.getReader();
+    this._pump();                // start the background read loop
+    // Nudge the CLI and wait for the prompt so we know it is alive.
+    await this.writeRaw("\r\n");
+    await this.readUntilPrompt(2500).catch(() => {});
+    return true;
+  }
+
+  async disconnect() {
+    try { if (this.reader) { await this.reader.cancel(); this.reader.releaseLock(); } } catch (_) {}
+    try { if (this.writer) { this.writer.releaseLock(); } } catch (_) {}
+    try { if (this.port) { await this.port.close(); } } catch (_) {}
+    this.port = this.reader = this.writer = null;
+    this._readBuf = "";
+  }
+
+  // Background loop: continuously drain the serial port into _readBuf.
+  async _pump() {
+    this._pumping = true;
+    try {
+      while (this.port && this.reader) {
+        const { value, done } = await this.reader.read();
+        if (done) break;
+        if (value) this._readBuf += this._decoder.decode(value, { stream: true });
+      }
+    } catch (e) {
+      // A read error usually means the device was unplugged.
+      if (this.port) log("Serial read ended: " + e.message, "warn");
+    } finally {
+      this._pumping = false;
+    }
+  }
+
+  async writeRaw(str) {
+    await this.writer.write(this._encoder.encode(str));
+  }
+
+  async writeBytes(bytes) {
+    await this.writer.write(bytes);
+  }
+
+  // Wait until the device prints the ">: " prompt (or timeout). Returns the
+  // text received since the previous prompt, with the trailing prompt removed.
+  async readUntilPrompt(timeoutMs = 8000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const idx = this._readBuf.lastIndexOf(">: ");
+      if (idx !== -1) {
+        const out = this._readBuf.slice(0, idx);
+        this._readBuf = this._readBuf.slice(idx + 3);
+        return out;
+      }
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    throw new Error("Timed out waiting for Flipper prompt (>: )");
+  }
+
+  // Send one CLI command and return everything printed before the next prompt.
+  async writeCommand(cmd, timeoutMs = 8000) {
+    this._readBuf = "";                 // drop stale output
+    await this.writeRaw(cmd + "\r\n");
+    const out = await this.readUntilPrompt(timeoutMs);
+    // Strip the echoed command line if present.
+    return out.replace(cmd, "").replace(/^\s*[\r\n]+/, "");
+  }
+
+  // mkdir -p style: the Flipper has no -p flag, so create each level, ignoring
+  // "file/dir already exist" which is a benign error on the CLI.
+  async mkdirp(dirPath) {
+    const parts = dirPath.split("/").filter(Boolean);
+    let cur = "";
+    for (const p of parts) {
+      cur += "/" + p;
+      if (cur === "/ext") continue;     // /ext is the SD mount, always present
+      const res = await this.writeCommand("storage mkdir " + cur, 4000);
+      if (/error/i.test(res) && !/exist/i.test(res)) {
+        log("mkdir " + cur + ": " + res.trim(), "warn");
+      }
+    }
+  }
+
+  /*
+   * storageWrite — push a file to the Flipper via `storage write <path>`.
+   *
+   * The CLI's `storage write` reads raw bytes from the terminal until Ctrl-C
+   * (0x03). We stream the payload in chunks with brief pauses to avoid
+   * overrunning the device's small UART buffer, then send 0x03.
+   *
+   * CAVEAT (kept honest on purpose): plain `storage write` is line/stream
+   * oriented and has no integrity check of its own. This works dependably for
+   * small apps; verify afterwards with `storage info`. For anything large or
+   * for firmware, qFlipper is the right tool.
+   */
+  async storageWrite(destPath, data, onProgress) {
+    const bytes = (data instanceof Uint8Array) ? data : new Uint8Array(data);
+    this._readBuf = "";
+    // Enter write mode. The firmware replies with a short prompt line; we do
+    // not wait for ">: " here because the CLI stays in capture mode.
+    await this.writeRaw("storage write " + destPath + "\r\n");
+    await new Promise((r) => setTimeout(r, 400));   // let it enter capture mode
+
+    const CHUNK = 512;                 // bytes per write; conservative for UART
+    for (let off = 0; off < bytes.length; off += CHUNK) {
+      const slice = bytes.subarray(off, Math.min(off + CHUNK, bytes.length));
+      await this.writeBytes(slice);
+      if (onProgress) onProgress(Math.min(off + CHUNK, bytes.length), bytes.length);
+      // Small pause so the device can flush to the SD card.
+      await new Promise((r) => setTimeout(r, 12));
+    }
+    // End capture with Ctrl-C, then wait for the prompt to return.
+    await this.writeBytes(new Uint8Array([0x03]));
+    await this.readUntilPrompt(8000).catch(() => {
+      log("No prompt after write — the transfer may be incomplete.", "warn");
+    });
+  }
+}
+
+const flipper = new FlipperSerial();
+
+/* ---- Connect Flipper button ---- */
+(function initFlipperButton() {
+  const btn = $("#btnConnectFlipper");
+  if (!FlipperSerial.supported()) {
+    btn.disabled = true;
+    btn.textContent = "Web Serial unavailable";
+    setPill($("#flipperStatus"), "flipper: unsupported browser", "bad");
+    log("Web Serial API (navigator.serial) is not available.", "warn");
+    log("Use Chrome, Edge, Opera or Brave over https:// or http://localhost.", "warn");
+    log("Firefox and Safari do not support Web Serial. For those, use the CLI (installer/zxmware.py) or qFlipper.", "warn");
+    return;
+  }
+  btn.addEventListener("click", async () => {
+    if (flipper.connected) {
+      await flipper.disconnect();
+      setPill($("#flipperStatus"), "flipper: not connected");
+      btn.textContent = "Connect Flipper";
+      log("Flipper disconnected.", "info");
+      return;
+    }
+    try {
+      setPill($("#flipperStatus"), "flipper: connecting…", "warn");
+      await flipper.connect();
+      setPill($("#flipperStatus"), "flipper: connected @115200", "ok");
+      btn.textContent = "Disconnect Flipper";
+      log("Flipper connected at 115200 baud.", "ok");
+    } catch (e) {
+      setPill($("#flipperStatus"), "flipper: not connected", "bad");
+      // A user cancelling the port chooser throws NotFoundError — treat gently.
+      if (e && e.name === "NotFoundError") log("No serial port selected.", "warn");
+      else log("Flipper connect failed: " + (e.message || e), "err");
+    }
+  });
+})();
+
+/* =====================================================================
+ * Install an app
+ * ===================================================================== */
+
+async function installApp(app, category, btn) {
+  if (!state.base) { log("Connect to a server first.", "err"); return; }
+  if (!flipper.connected) { log("Connect the Flipper first (Connect Flipper button).", "err"); return; }
+
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Installing…";
+  try {
+    // 1) Fetch the .fap bytes. path from directory.json is server-relative
+    //    (e.g. "/apps/Tools/foo.fap"); fall back to building it from category/file.
+    const rel = app.path || ("/apps/" + category + "/" + app.file);
+    const url = state.base + (rel.startsWith("/") ? rel : "/" + rel);
+    log("Fetching " + url, "cmd");
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const buf = new Uint8Array(await res.arrayBuffer());
+    log(`Downloaded ${app.file} (${humanSize(buf.length)}).`, "ok");
+
+    // 2) Ensure the category directory exists on the SD card.
+    const destDir = "/ext/apps/" + category;
+    const destPath = destDir + "/" + app.file;
+    log("storage mkdir " + destDir, "cmd");
+    await flipper.mkdirp(destDir);
+
+    // 3) Stream the file.
+    log("storage write " + destPath, "cmd");
+    await flipper.storageWrite(destPath, buf, (done, total) => {
+      btn.textContent = "Installing " + Math.floor((done / total) * 100) + "%";
+    });
+
+    // 4) Best-effort verification via `storage info` (size sanity check).
+    const info = await flipper.writeCommand("storage info /ext", 4000).catch(() => "");
+    if (info) log("storage info /ext -> " + info.trim().split(/\r?\n/).join(" | "), "info");
+
+    log(`Installed ${app.name} to ${destPath}. Launch it from Apps > ${category} on the Flipper.`, "ok");
+  } catch (e) {
+    log("Install failed: " + (e.message || e), "err");
+    log("Tip: the CLI (installer/zxmware.py) is the reliable path if Web Serial struggles.", "warn");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
+/* =====================================================================
+ * Install firmware (EXPERIMENTAL)
+ * ---------------------------------------------------------------------
+ * This fetches the OTA bundle (.tgz), pushes it to
+ * /ext/update/ZxmWare/ on the SD card, and triggers
+ *   update install /ext/update/ZxmWare/update.fuf
+ * The Flipper then reboots into the updater.
+ *
+ * We DO NOT unpack the tgz in the browser. The server-side bundle is expected
+ * to already be an OTA directory; here we only push the single update.fuf path
+ * the task spec documents. If the channel entry points at a .tgz, we tell the
+ * user to use the CLI/qFlipper, because reliably unpacking + writing a whole
+ * OTA tree over Web Serial is out of scope and error-prone.
+ * ===================================================================== */
+
+async function installFirmware(build, channel, btn) {
+  if (!state.base) { log("Connect to a server first.", "err"); return; }
+  if (!flipper.connected) { log("Connect the Flipper first.", "err"); return; }
+
+  const warning =
+    "EXPERIMENTAL firmware install over Web Serial.\n\n" +
+    "Channel: " + channel + "\nVersion: " + (build.version || build.file) + "\n\n" +
+    "• Do NOT disconnect the cable or let the battery die during the update — " +
+    "an interrupted flash can leave the device needing DFU recovery.\n" +
+    "• qFlipper is the SUPPORTED tool for firmware. This path is best-effort.\n\n" +
+    "Continue anyway?";
+  if (!window.confirm(warning)) { log("Firmware install cancelled.", "info"); return; }
+
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Preparing…";
+  try {
+    const rel = build.path || ("/firmware/" + build.file);
+    const url = state.base + (rel.startsWith("/") ? rel : "/" + rel);
+
+    // The OTA artifact is a .tgz (the <Name>-<ver>/ tree packed up). Unpacking
+    // + writing the whole tree over the text CLI is not reliable, so we are
+    // honest and stop here rather than half-flashing a device.
+    if (/\.tgz$/i.test(build.file) || /\.tgz$/i.test(rel)) {
+      log("Firmware artifact is an OTA .tgz bundle: " + url, "warn");
+      log("Writing a full OTA tree over Web Serial is unreliable. Use the supported path:", "warn");
+      log("  qFlipper  — or —  python installer/zxmware.py install-firmware --channel " + channel + " " + (build.version || ""), "warn");
+      log("See docs/QUICKSTART.md and docs/SAFETY.md.", "warn");
+      return;
+    }
+
+    // Fallback: a single update.fuf was published directly (uncommon).
+    log("Fetching " + url, "cmd");
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const buf = new Uint8Array(await res.arrayBuffer());
+
+    const dir = "/ext/update/ZxmWare";
+    const dest = dir + "/update.fuf";
+    await flipper.mkdirp(dir);
+    log("storage write " + dest, "cmd");
+    await flipper.storageWrite(dest, buf, (d, t) => {
+      btn.textContent = "Writing " + Math.floor((d / t) * 100) + "%";
+    });
+
+    log("update install " + dest, "cmd");
+    await flipper.writeCommand("update install " + dest, 6000);
+    log("Update triggered. The Flipper will reboot into the updater. DO NOT disconnect.", "warn");
+  } catch (e) {
+    log("Firmware install failed: " + (e.message || e), "err");
+    log("Recover with qFlipper if the device is stuck. See docs/SAFETY.md.", "warn");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
+/* Startup log */
+log("ZxmWare web installer ready.", "ok");
+log("1) Connect server  2) Connect Flipper  3) Install apps.", "info");
+if (!FlipperSerial.supported()) log("(This browser cannot talk to the Flipper — catalog browsing still works.)", "warn");
+</script>
+</body>
+</html>

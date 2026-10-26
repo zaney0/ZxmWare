@@ -1,0 +1,38 @@
+# ZxmWare - docker-compose for the distribution/package server.
+#
+#   docker compose up -d        # build + run in the background
+#   docker compose logs -f      # follow logs
+#   docker compose down         # stop
+#
+# Drop firmware bundles into ./data/firmware and .fap apps into
+# ./data/apps/<Category>/ on the host; they appear immediately (no rebuild).
+
+services:
+  zxmware:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zxmware:latest
+    container_name: zxmware
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Root of the served content inside the container.
+      DATA_DIR: /srv/data
+    volumes:
+      # Served content, read-only for the API process.
+      - ./data:/srv/data:ro
+
+      # The indexer writes directory.json into data/. If you run it from INSIDE this
+      # container (e.g. `docker compose exec zxmware python -m indexer`), the :ro mount
+      # above will block those writes. In that case switch the mount to read-write by
+      # commenting out the :ro line above and uncommenting the line below instead:
+      # - ./data:/srv/data
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
